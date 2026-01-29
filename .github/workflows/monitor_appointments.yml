@@ -1,0 +1,131 @@
+name: Texas DPS Appointment Monitor (Playwright)
+
+on:
+  schedule:
+    # Run every 5 minutes during business hours (9 AM - 6 PM Central Time)
+    # GitHub Actions uses UTC, so Central Time (UTC-6) = 15:00-00:00 UTC
+    - cron: '*/5 15-23 * * 1-5'  # Monday-Friday, 9 AM - 5 PM CT
+    - cron: '*/5 0-2 * * 2-6'    # Monday-Friday continuation (next day UTC)
+    - cron: '*/10 15-23 * * 0,6'  # Saturday-Sunday (every 10 minutes)
+  
+  # Allow manual triggering
+  workflow_dispatch:
+
+jobs:
+  check-appointments:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+    
+    - name: Install Python dependencies
+      run: |
+        pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: Install Playwright browsers
+      run: |
+        playwright install chromium
+        playwright install-deps chromium
+    
+    - name: Create necessary directories
+      run: |
+        mkdir -p logs screenshots results
+    
+    - name: Run appointment checker
+      env:
+        FIRST_NAME: ${{ secrets.FIRST_NAME }}
+        LAST_NAME: ${{ secrets.LAST_NAME }}
+        DOB: ${{ secrets.DOB }}
+        SSN_LAST4: ${{ secrets.SSN_LAST4 }}
+        PHONE: ${{ secrets.PHONE }}
+        EMAIL: ${{ secrets.EMAIL }}
+        ZIP_CODE: ${{ secrets.ZIP_CODE }}
+        NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
+        SMTP_USER: ${{ secrets.SMTP_USER }}
+        SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+        SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+        SMTP_PORT: ${{ secrets.SMTP_PORT }}
+        HEADLESS: 'true'
+        SCREENSHOT_ON_ERROR: 'true'
+      run: |
+        cd src
+        python appointment_checker.py
+      continue-on-error: true
+    
+    - name: Upload logs
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: logs-${{ github.run_number }}
+        path: logs/
+        if-no-files-found: ignore
+        retention-days: 7
+    
+    - name: Upload screenshots on error
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: screenshots-${{ github.run_number }}
+        path: screenshots/
+        if-no-files-found: ignore
+        retention-days: 7
+    
+    - name: Upload results if appointments found
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: results-${{ github.run_number }}
+        path: results/
+        if-no-files-found: ignore
+        retention-days: 30
+    
+    - name: Notify on workflow failure
+      if: failure()
+      run: |
+        echo "Workflow failed - check logs and screenshots"
+        echo "This could indicate a problem with the checker itself"
+
+  # Optional: Run tests before checking appointments
+  test:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'  # Only on manual runs
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+    
+    - name: Install dependencies
+      run: |
+        pip install --upgrade pip
+        pip install -r requirements.txt
+        playwright install chromium
+        playwright install-deps chromium
+    
+    - name: Run unit tests
+      run: |
+        pytest tests/ -v -m "not integration" --tb=short
+    
+    - name: Upload test results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-results
+        path: |
+          .pytest_cache/
+          htmlcov/
+        if-no-files-found: ignore
