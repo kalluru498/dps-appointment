@@ -8,11 +8,11 @@ import json
 import asyncio
 from datetime import datetime
 from typing import Optional, Dict, List
-from dotenv import load_dotenv
-from playwright.async_api import async_playwright, Page, Browser, TimeoutError as PlaywrightTimeout
-from utils.notifier import EmailNotifier
-from utils.logger import setup_logger
-from utils.otp_handler import OTPHandler
+from dotenv import load_dotenv # type: ignore
+from playwright.async_api import async_playwright, Page, Browser, TimeoutError as PlaywrightTimeout # type: ignore
+from utils.notifier import EmailNotifier # type: ignore
+from utils.logger import setup_logger # type: ignore
+from utils.otp_handler import OTPHandler # type: ignore
 
 # Load environment variables from .env file
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'))
@@ -79,7 +79,7 @@ class DPSAppointmentChecker:
                 ]
             )
             
-            context = await self.browser.new_context(
+            context = await self.browser.new_context( # type: ignore
                 viewport={'width': 1920, 'height': 1080},
                 user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
             )
@@ -95,11 +95,11 @@ class DPSAppointmentChecker:
         """Navigate to the appointment scheduler"""
         try:
             logger.info(f"Navigating to {self.base_url}")
-            await self.page.goto(self.base_url, wait_until='networkidle', timeout=30000)
+            await self.page.goto(self.base_url, wait_until='networkidle', timeout=30000) # type: ignore
             
             # Click English button
-            await self.page.wait_for_selector("button:has-text('ENGLISH')", timeout=10000)
-            await self.page.click("button:has-text('ENGLISH')")
+            await self.page.wait_for_selector("button:has-text('ENGLISH')", timeout=10000) # type: ignore
+            await self.page.click("button:has-text('ENGLISH')") # type: ignore
             logger.info("Selected English language")
             
             await self.page.wait_for_load_state('networkidle')
@@ -239,7 +239,7 @@ class DPSAppointmentChecker:
                         # Click the radio to show email fields - use JavaScript click
                         try:
                             # Try using JavaScript click first
-                            await self.page.evaluate("el => el.click()", email_radio)
+                            await self.page.evaluate("el => el.click()", email_radio) # type: ignore
                             logger.info("[OK] Clicked Email radio button via JavaScript")
                             await asyncio.sleep(2)  # Wait for form to update and show email fields
                         except Exception as js_error:
@@ -484,9 +484,16 @@ class DPSAppointmentChecker:
                 otp_code = await otp_handler.get_otp_from_email(timeout=120, check_interval=5)
                 
                 if not otp_code:
-                    logger.error("Could not retrieve OTP from email")
-                    return False
-                
+                    logger.warning("Could not retrieve OTP from email — waiting for manual bypass...")
+                    try:
+                        # Smart bypass: check if page changes anyway (manual entry)
+                        await self.page.wait_for_selector("button:has-text('New Appointment'), button:has-text('NEW APPOINTMENT')", timeout=30000) # type: ignore
+                        logger.info("Navigation detected — OTP resolved externally")
+                        return True
+                    except:
+                        logger.error("Could not retrieve OTP from email and no navigation detected")
+                        return False
+
                 logger.info(f"[OK] OTP retrieved: {otp_code}")
                 
                 # Fill OTP field
@@ -594,7 +601,7 @@ class DPSAppointmentChecker:
                     if len(btn_text) > 10 and 'dl' in btn_text.lower():  # Looks like a service option
                         try:
                             await btn.click()
-                            logger.info(f"Clicked service button {idx}: '{btn_text.strip()}'")
+                            logger.info(f"Clicked service button {idx}: '{str(btn_text).strip()}'")
                             service_clicked = True
                             break
                         except Exception as e:

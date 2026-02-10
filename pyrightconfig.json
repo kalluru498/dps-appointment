@@ -1,0 +1,9 @@
+{
+    "executionEnvironments": [
+        {
+            "root": "src"
+        }
+    ],
+    "reportMissingImports": false,
+    "reportMissingTypeStubs": false
+}

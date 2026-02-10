@@ -1,0 +1,220 @@
+# Full-Stack AI Agent DPS Booking System
+
+Transform the existing DPS monitor into an intelligent, autonomous booking application with a web dashboard, AI decision engine, continuous monitoring, and automated booking.
+
+## User Review Required
+
+> [!IMPORTANT]
+> **This is a major architectural change.** The project grows from a single-script monitor to a full-stack application with backend API, database, background scheduler, and React frontend. The existing Playwright automation code will be refactored and extended, not replaced.
+
+> [!WARNING]
+> **Automated booking depends on OTP.** The DPS site requires OTP verification. The system will attempt to auto-read OTP from Gmail via IMAP. If OTP delivery is delayed or the email format changes, booking will fail gracefully and notify you. **Full end-to-end auto-booking is best-effort.**
+
+> [!CAUTION]
+> **Your [.env](file:///c:/Users/kallu/dps-monitor/.env) file contains real credentials** (Gmail App Password, SSN last 4, DOB). The new system stores user profiles in a local SQLite database. Never commit the database file or [.env](file:///c:/Users/kallu/dps-monitor/.env).
+
+---
+
+## Architecture Overview
+
+```mermaid
+graph TD
+    A["🖥️ React Frontend<br/>(Vite + React)"] -->|REST + WebSocket| B["⚡ FastAPI Backend"]
+    B --> C["🧠 AI Decision Engine"]
+    B --> D["📅 Scheduler<br/>(APScheduler)"]
+    D --> E["🤖 Booking Engine<br/>(Playwright)"]
+    E --> F["🌐 txdpsscheduler.com"]
+    E --> G["📧 OTP Handler<br/>(IMAP)"]
+    E --> H["📬 Email Notifier<br/>(SMTP)"]
+    B --> I["🗄️ SQLite Database"]
+    
+    style A fill:#61dafb,color:#000
+    style B fill:#009688,color:#fff
+    style C fill:#ff9800,color:#000
+    style E fill:#4caf50,color:#fff
+```
+
+---
+
+## Proposed Changes
+
+### Backend API Layer
+
+#### [NEW] [main.py](file:///c:/Users/kallu/dps-monitor/src/api/main.py)
+FastAPI application entry point with:
+- REST endpoints for user profiles, booking jobs, agent logs
+- WebSocket endpoint (`/ws`) for real-time monitoring status push
+- CORS middleware for frontend
+- Lifespan handler to start/stop the background scheduler
+
+#### [NEW] [routes.py](file:///c:/Users/kallu/dps-monitor/src/api/routes.py)
+API route definitions:
+- `POST /api/users` — Create/update user profile
+- `GET /api/users/{id}` — Get user profile
+- `POST /api/jobs` — Start a monitoring/booking job
+- `DELETE /api/jobs/{id}` — Stop a job
+- `GET /api/jobs` — List all jobs with status
+- `GET /api/jobs/{id}/logs` — Get agent activity logs for a job
+- `GET /api/bookings` — Booking history
+- `POST /api/analyze` — AI analysis of user profile → recommended service type
+
+#### [NEW] [websocket.py](file:///c:/Users/kallu/dps-monitor/src/api/websocket.py)
+WebSocket connection manager for broadcasting real-time updates (monitoring status, appointment found, booking progress, errors) to the frontend.
+
+---
+
+### AI Decision Engine
+
+#### [NEW] [decision_engine.py](file:///c:/Users/kallu/dps-monitor/src/agent/decision_engine.py)
+Intelligent service type selector. Given a user profile, determines:
+- **Service type** (first-time DL, renewal, replacement, permit, ID card, CDL, etc.)
+- **Booking criteria** (preferred dates, same-day priority, max distance)
+- **Slot scoring** (ranks available slots by desirability: today > tomorrow > this week)
+
+Logic is rule-based with clear mappings:
+| User Situation | DPS Service |
+|---|---|
+| No existing TX license, age ≥ 18 | Apply for first time Texas DL |
+| No existing TX license, age < 18 | Apply for first time Texas Permit |
+| Has TX DL, near expiry | Renew Texas DL |
+| Lost/stolen DL | Replace Texas DL |
+| Out-of-state DL | Transfer out-of-state DL |
+| Commercial needs | CDL related services |
+| ID only | Texas ID card |
+
+#### [NEW] [scheduler.py](file:///c:/Users/kallu/dps-monitor/src/agent/scheduler.py)
+APScheduler-based background job manager:
+- Runs booking checks every 3–5 minutes (configurable per user)
+- Manages multiple concurrent jobs
+- Emits status events via WebSocket
+- Handles graceful shutdown
+
+---
+
+### Booking Engine (Refactored)
+
+#### [MODIFY] [appointment_checker.py](file:///c:/Users/kallu/dps-monitor/src/appointment_checker.py)
+Refactor class into two concerns:
+1. **`BookingEngine`** — new class that wraps the existing Playwright automation but adds:
+   - `auto_book_slot(slot)` — clicks through to confirm a specific appointment
+   - `select_service_type(service_name)` — dynamic service selection based on AI engine output (not hardcoded to "Apply for first time Texas DL")
+   - Status callback hook — reports progress to WebSocket
+2. Keep backward compatibility: [DPSAppointmentChecker](file:///c:/Users/kallu/dps-monitor/src/appointment_checker.py#23-858) becomes a thin wrapper calling `BookingEngine`
+
+#### [MODIFY] [otp_handler.py](file:///c:/Users/kallu/dps-monitor/src/utils/otp_handler.py)
+- Add retry logic with exponential backoff
+- Add support for searching multiple recent emails (not just the latest)
+- Add DPS-specific subject line filter (`from:txdps OR subject:passcode`)
+- Add timeout callback to notify user via WebSocket if OTP is stuck
+
+#### [MODIFY] [notifier.py](file:///c:/Users/kallu/dps-monitor/src/utils/notifier.py)
+- Add booking confirmation email template
+- Add "booking attempt failed" email template
+
+---
+
+### Data Layer
+
+#### [NEW] [models.py](file:///c:/Users/kallu/dps-monitor/src/models/models.py)
+Pydantic models + SQLAlchemy ORM models for:
+- `UserProfile` — name, DOB, SSN last 4, contact, license situation, preferences
+- `BookingJob` — user_id, service_type, status, schedule config, created_at
+- `AgentLog` — job_id, timestamp, message, level, screenshot_path
+- `BookingResult` — job_id, location, date, confirmation_id, status
+
+#### [NEW] [database.py](file:///c:/Users/kallu/dps-monitor/src/db/database.py)
+SQLite database setup with SQLAlchemy async engine. Auto-creates tables on startup. DB file at `data/dps_agent.db`.
+
+---
+
+### Frontend Dashboard
+
+#### [NEW] [frontend/](file:///c:/Users/kallu/dps-monitor/frontend/)
+Vite + React application with the following pages:
+
+**1. Onboarding Wizard** (`/`)
+- Multi-step form collecting user info
+- AI-powered service recommendation displayed after analysis
+- Beautiful glassmorphism card design with smooth step transitions
+
+**2. Dashboard** (`/dashboard`)
+- Live monitoring status (connected via WebSocket)
+- Current job status with animated indicators
+- Latest agent log entries scrolling
+- "Appointments Found!" alert with booking details
+- Quick actions: Start/Stop monitoring
+
+**3. Booking History** (`/history`)
+- Table of past booking attempts and confirmations
+- Status badges (⏳ Pending, ✅ Booked, ❌ Failed)
+
+**Design System:**
+- Dark mode with vibrant accent colors (cyan/teal gradient)
+- Inter font, smooth micro-animations
+- Responsive layout (works on mobile for quick checks)
+- Real-time animated status dots and progress indicators
+
+---
+
+### Configuration & Dependencies
+
+#### [MODIFY] [requirements.txt](file:///c:/Users/kallu/dps-monitor/requirements.txt)
+Add new dependencies:
+```
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+sqlalchemy[asyncio]==2.0.25
+aiosqlite==0.19.0
+pydantic==2.5.3
+apscheduler==3.10.4
+websockets==12.0
+```
+
+#### [MODIFY] [.gitignore](file:///c:/Users/kallu/dps-monitor/.gitignore)
+Add: `data/`, `frontend/node_modules/`, `frontend/dist/`
+
+---
+
+## Verification Plan
+
+### Automated Tests
+
+**1. Decision Engine Unit Tests**
+```bash
+cd c:\Users\kallu\dps-monitor
+python -m pytest tests/test_decision_engine.py -v
+```
+New test file `tests/test_decision_engine.py` will cover:
+- All 7 service type mappings
+- Slot scoring logic (same-day > next-day > future)
+- Edge cases (missing fields, ambiguous situations)
+
+**2. API Route Tests**
+```bash
+cd c:\Users\kallu\dps-monitor
+python -m pytest tests/test_api.py -v
+```
+New test file `tests/test_api.py` will test:
+- CRUD operations for user profiles
+- Job creation and listing
+- AI analyze endpoint returns valid service type
+
+**3. Existing Tests (must still pass)**
+```bash
+cd c:\Users\kallu\dps-monitor  
+python -m pytest tests/test_appointment_checker.py tests/test_notifier.py -v
+```
+
+### Manual Verification
+
+**Frontend Smoke Test:**
+1. Run backend: `cd src && uvicorn api.main:app --reload`
+2. Run frontend: `cd frontend && npm run dev`
+3. Open `http://localhost:5173` in the browser
+4. Complete the onboarding wizard with test data
+5. Verify the AI engine recommends the correct service type
+6. Click "Start Monitoring" and confirm WebSocket connection shows live status
+7. Check the dashboard shows agent log entries updating in real-time
+
+> [!NOTE]
+> Full end-to-end booking against the live DPS site requires real credentials and a real appointment to be available. This should be tested manually by you when you're ready to use the system for real.
