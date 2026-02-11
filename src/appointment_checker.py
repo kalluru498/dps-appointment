@@ -6,6 +6,7 @@ Main checker module for monitoring appointment availability
 import os
 import json
 import asyncio
+import re
 from datetime import datetime
 from typing import Optional, Dict, List
 from dotenv import load_dotenv # type: ignore
@@ -631,8 +632,12 @@ class DPSAppointmentChecker:
             await self.page.fill("input[placeholder='#####'], input[id*='zip']", self.config['zip_code'])
             logger.info(f"Entered ZIP code: {self.config['zip_code']}")
             
-            # Click Next
-            await self.page.click("button:has-text('NEXT')")
+            # Click Next (prefer strict role-based locator)
+            next_btn = self.page.get_by_role("button", name=re.compile(r"^Next$", re.I)).first
+            if await next_btn.count() > 0 and await next_btn.is_enabled():
+                await next_btn.click(timeout=5000)
+            else:
+                await self.page.click("button:has-text('NEXT')")
             logger.info("Searching for locations...")
             
             await self.page.wait_for_load_state('networkidle', timeout=15000)
@@ -682,7 +687,6 @@ class DPSAppointmentChecker:
             # If no specific location found, check if page has appointment slots at all
             if not location_found:
                 # Check for any date patterns which indicate appointments exist
-                import re
                 date_pattern = r'\d{1,2}/\d{1,2}/\d{4}'
                 dates = re.findall(date_pattern, page_content)
                 
@@ -695,29 +699,34 @@ class DPSAppointmentChecker:
             
             logger.info(f"Location: {location_found}")
             
-            # Look for all buttons and try to click Select
-            buttons = await self.page.query_selector_all("button")
-            logger.info(f"Found {len(buttons)} buttons on appointments page")
+            # Extract date information from clickable date cards first
+            unique_dates = []
+            seen_dates = set()
+            date_pattern = re.compile(r"\d{1,2}/\d{1,2}/\d{4}")
+            date_buttons = self.page.locator("button, [role='button']").filter(
+                has_text=re.compile(r"Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|\d{1,2}/\d{1,2}/\d{4}", re.I)
+            )
+            btn_count = await date_buttons.count()
+            logger.info(f"Found {btn_count} date-like buttons on appointments page")
+            for i in range(min(btn_count, 30)):
+                try:
+                    btn = date_buttons.nth(i)
+                    if not await btn.is_visible():
+                        continue
+                    btn_text = (await btn.text_content() or "").strip()
+                    if "Next Available Date" in btn_text:
+                        continue
+                    for match in date_pattern.findall(btn_text):
+                        if match not in seen_dates:
+                            seen_dates.add(match)
+                            unique_dates.append(match)
+                except Exception:
+                    continue
             
-            # Try to find and click Select button for the first location
-            select_clicked = False
-            for btn in buttons:
-                btn_text = await btn.text_content() or ""
-                if "select" in btn_text.lower():
-                    try:
-                        await btn.click(timeout=5000)
-                        logger.info("Clicked Select button for appointments")
-                        await asyncio.sleep(2)
-                        select_clicked = True
-                        break
-                    except Exception as e:
-                        logger.debug(f"Could not click select button: {e}")
-            
-            # Extract date information from page
-            import re
-            date_pattern = r'\d{1,2}/\d{1,2}/\d{4}'
-            dates = re.findall(date_pattern, page_content)
-            unique_dates = list(set(dates))
+            # Fallback to full page parse if needed
+            if not unique_dates:
+                dates = date_pattern.findall(page_content)
+                unique_dates = list(set(dates))
             
             # Sort dates if possible
             try:

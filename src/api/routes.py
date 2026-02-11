@@ -59,6 +59,8 @@ async def create_user(user: UserProfileCreate):
     data["recommended_service"] = analysis["recommended_service"]
 
     result = await db.create_user(data)
+    if result is None:
+        raise HTTPException(status_code=500, detail="Failed to create user")
     return _user_response(result)
 
 
@@ -93,6 +95,8 @@ async def update_user(user_id: str, user: UserProfileCreate):
     data["recommended_service"] = analysis["recommended_service"]
 
     result = await db.update_user(user_id, data)
+    if result is None:
+        raise HTTPException(status_code=500, detail="Failed to update user")
     return _user_response(result)
 
 
@@ -149,6 +153,8 @@ async def create_job(job: BookingJobCreate):
     }
 
     result = await db.create_job(data)
+    if result is None:
+        raise HTTPException(status_code=500, detail="Failed to create job")
 
     # Start the job in the background scheduler
     if _scheduler:
@@ -216,10 +222,13 @@ async def list_bookings():
 @router.get("/health")
 async def health_check():
     """Health check endpoint."""
+    scheduler_running = False
+    if _scheduler is not None and getattr(_scheduler, "scheduler", None) is not None:
+        scheduler_running = getattr(_scheduler.scheduler, "running", False)
     return {
         "status": "healthy",
         "service": "DPS Agent Booking System",
-        "scheduler_running": _scheduler.scheduler.running if _scheduler else False,
+        "scheduler_running": scheduler_running,
     }
 
 

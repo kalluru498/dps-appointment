@@ -184,7 +184,7 @@ class AgentScheduler:
 
                 if confirmed:
                     await self._log(job_id, "success",
-                                  f"🎉 BOOKED at {result['location']} on {result['next_available']}")
+                                  f"BOOKED at {result['location']} on {result['next_available']}")
                     await self._broadcast_status(job_id, "booked",
                                                f"Booked: {result['next_available']}")
                     # Stop the job since we're booked
@@ -203,7 +203,7 @@ class AgentScheduler:
                 try:
                     from utils.notifier import EmailNotifier  # type: ignore
                     notifier = EmailNotifier(config)
-                    subject = f"{'✅ BOOKED' if confirmed else '🔔 Found'}: DPS Appointment {result.get('next_available', '')}"
+                    subject = f"{'BOOKED' if confirmed else 'Found'}: DPS Appointment {result.get('next_available', '')}"
                     await notifier.send_notification(subject=subject, appointments=result)
                 except Exception as e:
                     await self._log(job_id, "warning", f"Email notification failed: {e}")
@@ -219,12 +219,14 @@ class AgentScheduler:
 
     def _build_config(self, user: Dict) -> Dict:
         """Build a booking engine config from a user profile."""
+        phone = user.get('phone', '')
         return {
             'first_name': user.get('first_name', ''),
             'last_name': user.get('last_name', ''),
             'dob': user.get('dob', ''),
             'ssn_last4': user.get('ssn_last4', ''),
-            'phone': user.get('phone', ''),
+            'phone': phone,
+            'cell_phone': phone,  # booking_engine uses this on Customer Details (Page 6)
             'email': user.get('email', ''),
             'zip_code': user.get('zip_code', '76201'),
             'location_preference': user.get('location_preference', 'Denton'),

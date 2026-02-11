@@ -41,6 +41,22 @@ async def lifespan(app: FastAPI):
     # Startup
     loop = asyncio.get_running_loop()
     logger.info(f"Starting DPS Agent Booking System... (Loop: {type(loop).__name__})")
+
+    # On Windows Proactor, client websocket disconnects can trigger noisy WinError 10054 callbacks.
+    if sys.platform == "win32":
+        previous_handler = loop.get_exception_handler()
+
+        def _loop_exception_handler(current_loop, context):
+            exc = context.get("exception")
+            if isinstance(exc, ConnectionResetError) and "10054" in str(exc):
+                logger.debug("Ignoring benign WinError 10054 transport disconnect")
+                return
+            if previous_handler:
+                previous_handler(current_loop, context)
+            else:
+                current_loop.default_exception_handler(context)
+
+        loop.set_exception_handler(_loop_exception_handler)
     
     if sys.platform == "win32" and "Proactor" not in type(loop).__name__:
         logger.warning(f"CRITICAL: Event loop is {type(loop).__name__}, but ProactorEventLoop is required for Playwright on Windows!")
