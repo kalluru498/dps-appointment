@@ -502,7 +502,7 @@ class BookingEngine:
             location_found = None
             for kw in ['denton', 'arlington', 'dallas', 'houston', 'austin', 'fort worth',
                         'san antonio', 'plano', 'mckinney', 'lewisville', 'carrollton']:
-                if kw in page_text.lower():
+                if kw in page_text.lower(): # type: ignore
                     location_found = kw.title()
                     break
 
@@ -556,105 +556,183 @@ class BookingEngine:
 
     # ─── Step 7: Auto-Book a Slot ────────────────────────────────
 
-    async def auto_book_slot(self, target_date: Optional[str] = None) -> bool:
+    def _build_candidate_dates(self, target_date: Optional[str], available_dates: Optional[List[str]]) -> List[str]:
+        """Build ordered list of dates to try: target first, then rest of available_dates."""
+        candidates = []
+        if target_date:
+            candidates.append(target_date)
+        if available_dates:
+            for d in available_dates:
+                if d and d not in candidates:
+                    candidates.append(d)
+        return candidates[:20]  # cap to avoid runaway
+
+    async def _click_date_on_page(self, page: Page, d: str) -> bool:
+        """Try to click a date on the current page (date carousel). Returns True if clicked."""
+        # Strategy A: exact text
+        date_el = page.get_by_text(d, exact=True).first
+        if await date_el.count() > 0:
+            try:
+                await date_el.click(timeout=5000)
+                return True
+            except Exception:
+                pass
+        # Strategy B: element containing the date
+        date_el = page.locator(f"text=/{re.escape(d)}/").first
+        if await date_el.count() > 0:
+            try:
+                await date_el.click(timeout=5000)
+                return True
+            except Exception:
+                pass
+        # Strategy C: day-name carousel
+        day_carousel = page.locator("text=/Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday/")
+        n = await day_carousel.count()
+        for i in range(min(n, 8)):
+            el = day_carousel.nth(i)
+            txt = (await el.text_content() or "").strip()
+            if d in txt or (len(txt) < 50 and re.search(r"\d{1,2}/\d{1,2}/\d{4}", txt)):
+                try:
+                    await el.click(timeout=5000)
+                    return True
+                except Exception:
+                    pass
+        return False
+
+    async def _find_and_click_time_slot(self, page: Page) -> bool:
+        """Find and click any available time slot on the Select Time page. Returns True if clicked."""
+        # Time format: "11:40 AM" - try buttons first, then any element with time + AM/PM
+        time_locators = [
+            page.locator("button").filter(has_text=re.compile(r"\d{1,2}:\d{2}\s*(AM|PM)", re.I)),
+            page.get_by_text(re.compile(r"\d{1,2}:\d{2}\s*(AM|PM)", re.I)),
+            page.locator("[role='button']").filter(has_text=re.compile(r"\d{1,2}:\d{2}|AM|PM", re.I)),
+        ]
+        for time_loc in time_locators:
+            cnt = await time_loc.count()
+            for i in range(cnt):
+                el = time_loc.nth(i)
+                try:
+                    if await el.is_visible():
+                        t_text = (await el.text_content() or "").strip()
+                        if re.search(r"\d{1,2}:\d{2}", t_text) and ("AM" in t_text.upper() or "PM" in t_text.upper()):
+                            await el.click(timeout=5000)
+                            await self._emit("success", f"Selected time slot: {t_text}")
+                            return True
+                except Exception:
+                    continue
+        return False
+
+    async def _click_previous(self, page: Page) -> bool:
+        """Click Previous to go back to the date selection page. Returns True if clicked."""
+        prev_btn = page.get_by_role("button", name=re.compile(r"Previous|PREVIOUS", re.I)).first
+        if await prev_btn.count() > 0:
+            try:
+                await prev_btn.click(timeout=5000)
+                return True
+            except Exception:
+                pass
+        return await self._click_button_by_text(["previous"])
+
+    async def auto_book_slot(
+        self, target_date: Optional[str] = None, available_dates: Optional[List[str]] = None
+    ) -> bool:
         """
-        Attempt to auto-book the best available appointment slot.
+        Attempt to auto-book an appointment. Tries each available date until one has time slots.
+        TX DPS flow: Select Location (date carousel) -> click date -> Next ->
+        Select Time -> click time -> Next -> Confirm page -> Confirm.
+        If no time slots for a date, clicks Previous and tries the next date.
         """
         page = self.page
         if not page:
             return False
-            
+
+        candidate_dates = self._build_candidate_dates(target_date, available_dates)
+        if not candidate_dates:
+            await self._emit("warning", "No dates to try for booking")
+            return False
+
         try:
             await self._emit("info", "Phase: Booking - Selecting slot and confirming...")
-
-            # 1. Identify all available date buttons
-            # Localize dates: they are often in grid or carousel items
-            date_buttons = page.locator("button, div[role='button'], div.v-btn").filter(has_text=re.compile(r'\d{1,2}/\d{1,2}/\d{4}'))
-            count = await date_buttons.count()
-            await self._emit("info", f"Found {count} date buttons on page")
-
-            candidate_dates = []
-            if target_date:
-                candidate_dates.append(target_date)
-            
-            # Fallback to other visible dates if primary fails
-            for i in range(min(count, 3)):
-                date_text = await date_buttons.nth(i).text_content()
-                if date_text:
-                    match = re.search(r'\d{1,2}/\d{1,2}/\d{4}', date_text)
-                    if match and match.group(0) not in candidate_dates:
-                        candidate_dates.append(match.group(0))
-
-            time_slot_clicked = False
-            for d in candidate_dates:
-                await self._emit("info", f"Trying to select date: {d}...")
-                
-                # Click the date button
-                d_btn = page.locator(f"text='{d}'").first
-                if await d_btn.count() > 0:
-                    await d_btn.click()
-                    await asyncio.sleep(2.5) # Wait for times to load
-                    
-                    # 2. Look for time slot buttons
-                    # They might contain AM/PM or HH:MM
-                    time_buttons = page.locator("button").filter(has_text=re.compile(r'(\d{1,2}:\d{2}|AM|PM)', re.IGNORECASE))
-                    time_count = await time_buttons.count()
-                    
-                    if time_count > 0:
-                        # Select the first available time slot
-                        for t_idx in range(time_count):
-                            t_btn = time_buttons.nth(t_idx)
-                            t_text = (await t_btn.text_content() or "").strip()
-                            
-                            # Check if button is enabled
-                            if await t_btn.is_enabled():
-                                await t_btn.click()
-                                await self._emit("success", f"Selected time slot: {t_text} for date {d}")
-                                time_slot_clicked = True
-                                break
-                    
-                    if time_slot_clicked:
-                        break
-                else:
-                    await self._emit("warning", f"Date button {d} not clickable")
-
-            if not time_slot_clicked:
-                await self._emit("warning", "Could not find or select any specific time slots")
-                # Attempt to proceed anyway as some pages auto-select or have a different layout
-                await self._save_screenshot("booking_no_time_found")
-
+            await self._emit("info", f"Will try up to {len(candidate_dates)} date(s) until a time slot is found.")
             await asyncio.sleep(1)
 
-            # 3. Click confirm/book/next button
-            # Usually 'NEXT', 'SUBMIT', 'CONFIRM', or 'BOOK'
-            await self._emit("info", "Attempting to click final confirmation button...")
-            
-            # Check if NEXT is enabled first
-            next_btn = page.locator("button:has-text('NEXT'), button:has-text('CONTINUE'), button:has-text('SUBMIT')").first
-            if await next_btn.count() > 0:
-                if not await next_btn.is_enabled():
-                    await self._emit("warning", "The 'NEXT' button is disabled (maybe time slot wasn't registered)")
-                
-                await next_btn.click(force=True)
-                await self._emit("info", "Clicked validation button")
-            else:
-                await self._click_button_by_text(['confirm', 'book', 'schedule', 'submit', 'next', 'continue'])
+            for date_index, d in enumerate(candidate_dates):
+                await self._emit("info", f"Trying date {date_index + 1}/{len(candidate_dates)}: {d}...")
 
-            await asyncio.sleep(3)
-            ss = await self._save_screenshot('booking_confirmation')
-            
-            # Final verification: Did we reach a confirmation screen?
-            # Look for keywords like "Confirmation", "Success", "Appointment Number"
-            final_content = await page.content()
-            if any(k in final_content.lower() for k in ['confirmation', 'success', 'appointment number', 'id:', 'booked']):
-                await self._emit("success", "🎉 Booking CONFIRMED! Verification details visible in screenshot.", ss)
-                return True
-            else:
-                await self._emit("warning", "Attempted booking, but confirmation screen not detected. Check screenshot.", ss)
+                # If we already tried at least one date and failed (no time slot), we're on the Time page — go back
+                if date_index > 0:
+                    await self._emit("info", "Going back to select another date...")
+                    if await self._click_previous(page):
+                        await asyncio.sleep(2)
+                    else:
+                        await self._emit("warning", "Could not click Previous to try another date")
+                        continue
+
+                # 1) Click the date on the Location/date page
+                date_clicked = await self._click_date_on_page(page, d)
+                if not date_clicked:
+                    await self._emit("warning", f"Could not click date {d}, skipping")
+                    continue
+                await self._emit("info", f"Selected date: {d}")
+                await asyncio.sleep(2)
+
+                # 2) Next -> Select Time page
+                next_btn = page.get_by_role("button", name=re.compile(r"Next|NEXT", re.I)).first
+                if await next_btn.count() > 0 and await next_btn.is_enabled():
+                    await next_btn.click()
+                    await self._emit("info", "Clicked Next (after date)")
+                else:
+                    await self._click_button_by_text(["next", "continue"])
+                await asyncio.sleep(2.5)  # allow time page to load
+
+                # 3) Find and click a time slot
+                time_slot_clicked = await self._find_and_click_time_slot(page)
+                if not time_slot_clicked:
+                    await self._emit("warning", f"No time slots for {d}; will try another date")
+                    continue
+
+                await asyncio.sleep(1)
+
+                # 4) Next -> Confirm page
+                next_btn = page.get_by_role("button", name=re.compile(r"Next|NEXT", re.I)).first
+                if await next_btn.count() > 0 and await next_btn.is_enabled():
+                    await next_btn.click()
+                    await self._emit("info", "Clicked Next (after time)")
+                else:
+                    await self._click_button_by_text(["next", "continue"])
+                await asyncio.sleep(2)
+
+                # 5) Confirm
+                confirm_btn = page.get_by_role("button", name=re.compile(r"Confirm|CONFIRM", re.I)).first
+                if await confirm_btn.count() > 0 and await confirm_btn.is_enabled():
+                    await confirm_btn.click()
+                    await self._emit("info", "Clicked Confirm")
+                else:
+                    await self._click_button_by_text(["confirm", "book", "schedule", "submit"])
+                await asyncio.sleep(3)
+
+                ss = await self._save_screenshot("booking_confirmation")
+                final_content = await page.content()
+                if any(
+                    k in final_content.lower()
+                    for k in [
+                        "confirmation number",
+                        "your appointment has been confirmed",
+                        "appointment has been confirmed",
+                        "has been confirmed",
+                    ]
+                ):
+                    await self._emit("success", "Booking CONFIRMED! Verification details visible in screenshot.", ss)
+                    return True
+                await self._emit("warning", "Confirm clicked but confirmation screen not detected. Check screenshot.", ss)
                 return False
 
+            await self._emit("warning", "Tried all dates but no time slots were available for any of them.")
+            await self._save_screenshot("booking_no_time_any_date")
+            return False
+
         except Exception as e:
-            ss = await self._save_screenshot('booking_error')
+            ss = await self._save_screenshot("booking_error")
             await self._emit("error", f"Auto-book error: {str(e)}", ss)
             return False
 
@@ -723,11 +801,12 @@ class BookingEngine:
 
                 appointments['booking_attempted'] = True
                 appointments['target_date'] = best_date
-                booked = await self.auto_book_slot(best_date)
+                # Pass all available dates so auto_book_slot can retry with another date if no time slots
+                booked = await self.auto_book_slot(best_date, appointments.get('available_dates'))
                 appointments['booking_confirmed'] = booked
 
                 if booked:
-                    await self._emit("success", f"🎉 Appointment BOOKED for {best_date}!")
+                    await self._emit("success", f"Appointment BOOKED for {best_date}!")
                 else:
                     await self._emit("warning",
                         "Auto-booking could not confirm. Please book manually ASAP!")
